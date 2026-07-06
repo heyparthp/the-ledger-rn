@@ -385,7 +385,8 @@ export default function App() {
       /paid to\s+([A-Za-z0-9&._\-* ]{2,30}?)(?:\s+on|\s+via|\.|,|$)/i,
       /spent\s+(?:on|at)\s+([A-Za-z0-9&._\-* ]{2,30}?)(?:\s+using|\s+on|\s+via|\.|,|$)/i,
       /at\s+([A-Z][A-Za-z0-9&._\- ]{2,30}?)(?:\s+on|\s+via|\.|,|$)/,
-      /to\s+([A-Z][A-Za-z0-9&._\- ]{2,30}?)(?:\s+on|\s+via|\.|,|$)/
+      /to\s+([A-Z][A-Za-z0-9&._\- ]{2,30}?)(?:\s+on|\s+via|\.|,|$)/,
+      /;\s*([A-Za-z0-9&._\- ]{2,30}?)\s+credited\b/i
     ];
     for (const p of vp) {
       const m = text.match(p);
@@ -402,7 +403,7 @@ export default function App() {
     else if (/debit card/.test(lo)) r.mode = 'debit';
     else if (/net\s*banking/.test(lo)) r.mode = 'netbanking';
 
-    const l4 = text.match(/(?:ending|xx+|account|a\/c|card|\*+)\s*(\d{4})\b/i) || text.match(/\b(?:\*|x){2,}(\d{4})\b/i);
+    const l4 = text.match(/(?:ending|xx+|account|a\/c|card|x|\*+)\s*:?\s*(\d{4})\b/i) || text.match(/\b(?:\*|x){1,4}(\d{4})\b/i);
     if (l4) r.last4 = l4[1];
 
     const timePats = [
@@ -769,12 +770,28 @@ export default function App() {
       }
 
       try {
-        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?timeout=10`);
+        let offset = '0';
+        try {
+          const savedOffset = await AsyncStorage.getItem('tg_offset');
+          if (savedOffset) offset = savedOffset;
+        } catch (e) {
+          console.log(e);
+        }
+
+        let url = `https://api.telegram.org/bot${token}/getUpdates?timeout=10`;
+        if (parseInt(offset) > 0) {
+          url += `&offset=${offset}`;
+        }
+        const res = await fetch(url);
         if (!res.ok) throw new Error('Failed to connect to Telegram API');
         const data = await res.json();
         if (!data.ok) throw new Error(data.description || 'Error fetching telegram messages');
         
         const updates = (data.result || []).filter(u => u.message && u.message.text);
+        if (updates.length > 0) {
+          const highestId = Math.max(...updates.map(u => u.update_id));
+          await AsyncStorage.setItem('tg_offset', String(highestId + 1));
+        }
         processTelegramUpdates(updates);
       } catch (err) {
         console.error(err);
@@ -2067,6 +2084,7 @@ export default function App() {
     const [tempTgToken, setTempTgToken] = useState(settings.telegramBotToken || '');
     const [tempTgChatId, setTempTgChatId] = useState(settings.telegramChatId || '');
     const [manualToken, setManualToken] = useState('');
+    const [tgSetupOs, setTgSetupOs] = useState('ios');
 
     const handleSaveSettings = () => {
       const updated = {
@@ -2239,20 +2257,69 @@ export default function App() {
           </TouchableOpacity>
 
           <View style={{ marginTop: 14, paddingTop: 14, borderTopWidth: 0.5, borderTopColor: c.line }}>
-            <Text style={{ fontSize: 11, fontWeight: '800', color: c.brass, marginBottom: 6 }}>📋 SETUP GUIDE:</Text>
+            <Text style={{ fontSize: 11, fontWeight: '800', color: c.brass, marginBottom: 8 }}>📋 SETUP GUIDE:</Text>
+            
+            {/* iOS / Android selector buttons */}
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+              <TouchableOpacity
+                onPress={() => setTgSetupOs('ios')}
+                style={{
+                  flex: 1,
+                  paddingVertical: 6,
+                  alignItems: 'center',
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: tgSetupOs === 'ios' ? c.brass : c.line,
+                  backgroundColor: tgSetupOs === 'ios' ? c.brass : 'transparent'
+                }}
+              >
+                <Text style={{ color: tgSetupOs === 'ios' ? '#FFFFFA' : c.inkMid, fontWeight: '700', fontSize: 10.5 }}>📱 iOS Shortcut</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setTgSetupOs('android')}
+                style={{
+                  flex: 1,
+                  paddingVertical: 6,
+                  alignItems: 'center',
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: tgSetupOs === 'android' ? c.brass : c.line,
+                  backgroundColor: tgSetupOs === 'android' ? c.brass : 'transparent'
+                }}
+              >
+                <Text style={{ color: tgSetupOs === 'android' ? '#FFFFFA' : c.inkMid, fontWeight: '700', fontSize: 10.5 }}>🤖 Android App</Text>
+              </TouchableOpacity>
+            </View>
+
             <Text style={{ fontSize: 11, fontWeight: '700', color: c.ink, marginBottom: 2 }}>1. Create Bot & Chat ID:</Text>
-            <Text style={{ fontSize: 10.5, color: c.inkSoft, marginBottom: 6, lineHeight: 14 }}>
+            <Text style={{ fontSize: 10, color: c.inkSoft, marginBottom: 8, lineHeight: 14 }}>
               • Search @BotFather on Telegram, send /newbot, and copy the HTTP Token.{"\n"}
               • Search @userinfobot to get your numeric Chat ID.{"\n"}
               • IMPORTANT: Send a message to your new bot (click Start) so it can contact you.
             </Text>
-            <Text style={{ fontSize: 11, fontWeight: '700', color: c.ink, marginBottom: 2 }}>2. iOS Shortcut Setup:</Text>
-            <Text style={{ fontSize: 10.5, color: c.inkSoft, lineHeight: 14 }}>
-              • Open Shortcuts app → Automation tab → Create Personal Automation.{"\n"}
-              • Choose Message trigger (Sender: Anyone, Contains: "debited" or "spent", Run Immediately).{"\n"}
-              • Add Get Contents of URL action. Set URL to:{"\n"}
-              https://api.telegram.org/bot[TOKEN]/sendMessage?chat_id=[CHAT_ID]&text=[Shortcut Input] (set text to Message -> Body).
-            </Text>
+
+            {tgSetupOs === 'ios' ? (
+              <View>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: c.ink, marginBottom: 2 }}>2. iOS Shortcut Setup (Reliable POST Method):</Text>
+                <Text style={{ fontSize: 10, color: c.inkSoft, lineHeight: 14 }}>
+                  • Open Shortcuts app → Automation tab → Create Personal Automation.{"\n"}
+                  • Choose Message trigger (Sender: Anyone, Contains: "debited" or "spent", Run Immediately).{"\n"}
+                  • Add Action: URL (paste URL: https://api.telegram.org/bot[TOKEN]/sendMessage).{"\n"}
+                  • Add Action: Get Contents of URL (Method: POST, Headers: Content-Type = application/json, Body: JSON, Add field 'chat_id' (Text, paste Chat ID) and field 'text' (Text, select Shortcut Input -> Message -> Body).
+                </Text>
+              </View>
+            ) : (
+              <View>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: c.ink, marginBottom: 2 }}>2. Android Auto-Forwarder App:</Text>
+                <Text style={{ fontSize: 10, color: c.inkSoft, lineHeight: 14 }}>
+                  • Install a free SMS forwarding app from Google Play Store (e.g. "SMS to Telegram" by LanRen).{"\n"}
+                  • Open the app, select Telegram Bot as destination.{"\n"}
+                  • Paste your Bot Token and Chat ID from Step 1.{"\n"}
+                  • Set up text filters containing words like "spent", "debited", "spent on Card", "Rs.", "₹", "INR".{"\n"}
+                  • Enable service and SMS permission. Incoming alerts will now auto-sync!
+                </Text>
+              </View>
+            )}
           </View>
         </View>
 
