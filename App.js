@@ -18,6 +18,7 @@ import {
   PermissionsAndroid
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createClient } from '@supabase/supabase-js';
 
 // ═══════════════════════════════════════════════
 // MCC DATA & CONSTANTS
@@ -202,8 +203,31 @@ export default function App() {
   const [upiAccounts, setUpiAccounts] = useState(DEFAULT_UPI);
   const [merchantDb, setMerchantDb] = useState({});
   const [categories, setCategories] = useState(DEFAULT_CATS);
-  const [settings, setSettings] = useState({ currency: '₹', googleClientId: '', syncDays: 14, telegramBotToken: '', telegramChatId: '' });
+  const [settings, setSettings] = useState({ currency: '₹', googleClientId: '', syncDays: 14, telegramBotToken: '', telegramChatId: '', supabaseUrl: '', supabaseAnonKey: '' });
   const [googleToken, setGoogleToken] = useState(null);
+  const [supabaseClient, setSupabaseClient] = useState(null);
+  const [sbUser, setSbUser] = useState(null);
+
+  const initSupabase = (settingsObj) => {
+    const url = settingsObj?.supabaseUrl || settings.supabaseUrl;
+    const key = settingsObj?.supabaseAnonKey || settings.supabaseAnonKey;
+    if (url && key) {
+      try {
+        const client = createClient(url, key);
+        setSupabaseClient(client);
+        client.auth.getUser().then(({ data: { user } }) => setSbUser(user));
+        return client;
+      } catch (e) {
+        console.error('Supabase init error:', e);
+        setSupabaseClient(null);
+        setSbUser(null);
+      }
+    } else {
+      setSupabaseClient(null);
+      setSbUser(null);
+    }
+    return null;
+  };
 
   // Sync Logic Status
   const [isSyncing, setIsSyncing] = useState(false);
@@ -241,6 +265,7 @@ export default function App() {
     const loadState = async () => {
       try {
         const val = await AsyncStorage.getItem(STORE_KEY);
+        let currentSettings = settings;
         if (val) {
           const d = JSON.parse(val);
           if (d.entries) setEntries(d.entries);
@@ -248,7 +273,42 @@ export default function App() {
           if (d.upiAccounts) setUpiAccounts(d.upiAccounts);
           if (d.merchantDb) setMerchantDb(d.merchantDb);
           if (d.categories) setCategories(d.categories);
-          if (d.settings) setSettings(d.settings);
+          if (d.settings) {
+            setSettings(d.settings);
+            currentSettings = d.settings;
+          }
+        }
+        
+        // Initial Supabase Sync
+        const client = initSupabase(currentSettings);
+        if (client) {
+          const { data: { user } } = await client.auth.getUser();
+          if (user) {
+            const { data, error } = await client
+              .from('user_data')
+              .select('data')
+              .eq('id', user.id)
+              .single();
+            if (!error && data?.data) {
+              const d = data.data;
+              if (d.entries) setEntries(d.entries);
+              if (d.cards) setCards(d.cards);
+              if (d.upiAccounts) setUpiAccounts(d.upiAccounts);
+              if (d.merchantDb) setMerchantDb(d.merchantDb);
+              if (d.categories) setCategories(d.categories);
+              
+              const mergedSettings = {
+                ...(d.settings || {}),
+                supabaseUrl: currentSettings.supabaseUrl,
+                supabaseAnonKey: currentSettings.supabaseAnonKey
+              };
+              setSettings(mergedSettings);
+              await AsyncStorage.setItem(STORE_KEY, JSON.stringify({
+                ...d,
+                settings: mergedSettings
+              }));
+            }
+          }
         }
         
         // Restore Google token if valid
@@ -276,6 +336,19 @@ export default function App() {
         settings: updatedData.settings ?? settings,
       };
       await AsyncStorage.setItem(STORE_KEY, JSON.stringify(payload));
+      
+      if (supabaseClient) {
+        const { data: { user } } = await supabaseClient.auth.getUser();
+        if (user) {
+          await supabaseClient
+            .from('user_data')
+            .upsert({
+              id: user.id,
+              data: payload,
+              updated_at: new Date().toISOString()
+            });
+        }
+      }
     } catch (e) {
       console.error("Persistence Error:", e);
     }
@@ -2083,6 +2156,10 @@ export default function App() {
     const [tempDays, setTempDays] = useState(String(settings.syncDays || 14));
     const [tempTgToken, setTempTgToken] = useState(settings.telegramBotToken || '');
     const [tempTgChatId, setTempTgChatId] = useState(settings.telegramChatId || '');
+    const [tempSbUrl, setTempSbUrl] = useState(settings.supabaseUrl || '');
+    const [tempSbAnonKey, setTempSbAnonKey] = useState(settings.supabaseAnonKey || '');
+    const [sbEmail, setSbEmail] = useState('');
+    const [sbPassword, setSbPassword] = useState('');
     const [manualToken, setManualToken] = useState('');
     const [tgSetupOs, setTgSetupOs] = useState('ios');
 
@@ -2098,6 +2175,90 @@ export default function App() {
       setSettings(updated);
       persistState({ settings: updated });
       Alert.alert("Success", "Settings saved successfully!");
+    };
+
+    const handleSaveSupabase = () => {
+      const updated = {
+        ...settings,
+        supabaseUrl: tempSbUrl.trim(),
+        supabaseAnonKey: tempSbAnonKey.trim()
+      };
+      setSettings(updated);
+      persistState({ settings: updated });
+      initSupabase(updated);
+      Alert.alert("Success", "Supabase credentials updated successfully!");
+    };
+
+    const handleSbLogin = async () => {
+      if (!sbEmail.trim() || !sbPassword.trim()) {
+        Alert.alert("Error", "Please fill in email and password");
+        return;
+      }
+      try {
+        const { data, error } = await supabaseClient.auth.signInWithPassword({
+          email: sbEmail.trim(),
+          password: sbPassword.trim()
+        });
+        if (error) {
+          Alert.alert("Error", error.message);
+          return;
+        }
+        setSbUser(data.user);
+        
+        // Fetch database state
+        const { data: dbData, error: dbErr } = await supabaseClient
+          .from('user_data')
+          .select('data')
+          .eq('id', data.user.id)
+          .single();
+          
+        if (!dbErr && dbData?.data) {
+          const d = dbData.data;
+          if (d.entries) setEntries(d.entries);
+          if (d.cards) setCards(d.cards);
+          if (d.upiAccounts) setUpiAccounts(d.upiAccounts);
+          if (d.merchantDb) setMerchantDb(d.merchantDb);
+          if (d.categories) setCategories(d.categories);
+          Alert.alert("Success", "Signed in and data synced successfully!");
+        } else {
+          Alert.alert("Success", "Signed in successfully!");
+        }
+      } catch (e) {
+        console.error(e);
+        Alert.alert("Error", "Authentication failed");
+      }
+    };
+
+    const handleSbRegister = async () => {
+      if (!sbEmail.trim() || !sbPassword.trim()) {
+        Alert.alert("Error", "Please fill in email and password");
+        return;
+      }
+      try {
+        const { data, error } = await supabaseClient.auth.signUp({
+          email: sbEmail.trim(),
+          password: sbPassword.trim()
+        });
+        if (error) {
+          Alert.alert("Error", error.message);
+          return;
+        }
+        Alert.alert("Success", "Registration complete! Check your email for verification.");
+      } catch (e) {
+        console.error(e);
+        Alert.alert("Error", "Registration failed");
+      }
+    };
+
+    const handleSbLogout = async () => {
+      try {
+        await supabaseClient.auth.signOut();
+        setSbUser(null);
+        Alert.alert("Success", "Logged out from Supabase Sync.");
+      } catch (e) {
+        console.error(e);
+        Alert.alert("Error", "Sign out failed");
+      }
     };
 
     const handleConnectGmail = () => {
@@ -2323,6 +2484,80 @@ export default function App() {
           </View>
         </View>
 
+        <Text style={s.sectionHeader(c)}>☁️ SUPABASE CLOUD SYNC</Text>
+        <View style={s.card(c)}>
+          <Text style={{ color: c.inkSoft, fontSize: 12, marginBottom: 12, lineHeight: 16 }}>
+            Enable real-time database state synchronization between this mobile app and the static web app using a free Supabase project.
+          </Text>
+          
+          <Text style={s.fieldLabel(c)}>Supabase API URL</Text>
+          <TextInput
+            style={s.input(c)}
+            placeholder="https://xxxxxx.supabase.co"
+            placeholderTextColor={c.inkSoft}
+            value={tempSbUrl}
+            onChangeText={setTempSbUrl}
+            autoCapitalize="none"
+          />
+
+          <Text style={[s.fieldLabel(c), { marginTop: 10 }]}>Supabase Anon Key</Text>
+          <TextInput
+            style={s.input(c)}
+            secureTextEntry
+            placeholder="eyJh......"
+            placeholderTextColor={c.inkSoft}
+            value={tempSbAnonKey}
+            onChangeText={setTempSbAnonKey}
+            autoCapitalize="none"
+          />
+
+          <TouchableOpacity onPress={handleSaveSupabase} style={[s.btn(c), { marginTop: 14, backgroundColor: c.brass, borderColor: c.brass }]}>
+            <Text style={{ color: '#FFFFFA', fontWeight: '700' }}>Save credentials</Text>
+          </TouchableOpacity>
+
+          {supabaseClient && (
+            <View style={{ marginTop: 16, paddingTop: 16, borderTopWidth: 0.5, borderTopColor: c.line }}>
+              {sbUser ? (
+                <View>
+                  <Text style={{ color: c.ink, fontSize: 13, fontWeight: '700', marginBottom: 8 }}>
+                    ✓ Synced: {sbUser.email}
+                  </Text>
+                  <TouchableOpacity onPress={handleSbLogout} style={[s.btn(c), { backgroundColor: c.red, borderColor: c.red }]}>
+                    <Text style={{ color: '#FFFFFA', fontWeight: '600' }}>Sign Out</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View>
+                  <Text style={{ color: c.inkSoft, fontSize: 11.5, marginBottom: 8 }}>Log in to sync your local data to the cloud:</Text>
+                  <Text style={s.fieldLabel(c)}>Email Address</Text>
+                  <TextInput
+                    style={s.input(c)}
+                    keyboardType="email-address"
+                    autoCapitalize="none"
+                    value={sbEmail}
+                    onChangeText={setSbEmail}
+                  />
+                  <Text style={[s.fieldLabel(c), { marginTop: 8 }]}>Password</Text>
+                  <TextInput
+                    style={s.input(c)}
+                    secureTextEntry
+                    value={sbPassword}
+                    onChangeText={setSbPassword}
+                  />
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+                    <TouchableOpacity onPress={handleSbLogin} style={[s.btn(c), { flex: 1, backgroundColor: c.brass, borderColor: c.brass }]}>
+                      <Text style={{ color: '#FFFFFA', fontWeight: '600', textAlign: 'center' }}>Sign In</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={handleSbRegister} style={[s.btn(c), { flex: 1, backgroundColor: c.inkMid, borderColor: c.inkMid }]}>
+                      <Text style={{ color: c.paper, fontWeight: '600', textAlign: 'center' }}>Sign Up</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+
         <Text style={s.sectionHeader(c)}>DANGER ZONE</Text>
         <View style={s.card(c)}>
           <Text style={{ color: c.inkSoft, fontSize: 12, marginBottom: 12 }}>This action deletes all transactions, customized credit cards, UPI connections, and merchant mappings permanently.</Text>
@@ -2343,7 +2578,10 @@ export default function App() {
       <View style={[s.pageHead(c), { paddingHorizontal: 14, paddingBottom: 10 }]}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <View>
-            <Text style={[s.brandTitle(c)]}>The Ledger</Text>
+            <Text style={{ fontWeight: '800', fontSize: 20, color: c.ink }}>
+              Ledge
+              <Text style={{ fontWeight: '400', fontSize: 13, color: c.inkSoft }}>.money</Text>
+            </Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
               <Text style={{ fontSize: 11, color: c.inkSoft, fontStyle: 'italic' }}>track what goes out</Text>
               <Switch value={isDarkMode} onValueChange={setIsDarkMode} style={{ transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }] }} trackColor={{ false: c.line, true: c.brass }} thumbColor={isDarkMode ? c.paper : c.inkSoft} />
